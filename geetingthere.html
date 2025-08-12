@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Malawi Borehole Dashboard (Fixed)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet & plugins -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <style>
+    html,body { height:100%; margin:0; font-family:Arial, sans-serif; color:#222; }
+    #topbar{position:fixed;top:0;left:0;right:0;height:48px;padding:8px 12px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,0.06);z-index:1200;display:flex;justify-content:space-between;align-items:center}
+    #container{display:flex; margin-top:48px; height:calc(100vh - 48px); min-height:0}
+    #map{flex:1; height:100%}
+    #sidebar{width:360px; padding:12px; box-sizing:border-box; background:#f8f9fa; border-left:1px solid #e6eef8; overflow:auto}
+    .tabs{display:flex;gap:6px}
+    .tab{flex:1;padding:8px;text-align:center;background:#eaeef3;border-radius:6px;cursor:pointer}
+    .tab.active{background:linear-gradient(90deg,#007bff,#0056d6);color:#fff}
+    input[type=file],input[type=text],select,button{width:100%;margin:6px 0;padding:8px;border-radius:6px;border:1px solid #cfcfcf;box-sizing:border-box}
+    button{background:#007bff;color:#fff;border:none;cursor:pointer}
+    .instructions{background:linear-gradient(180deg,#fff,#f7fbff);padding:8px;border-radius:6px;border:1px solid #dfeeff;font-size:13px;margin-bottom:8px}
+    .muted{color:#666;font-size:13px}
+    .legend{background:#fff;padding:8px;border-radius:6px;border:1px solid #ddd;margin-top:8px}
+    .legend-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+    .collapsible{display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+    canvas{width:100% !important; height:220px !important}
+  </style>
+</head>
+<body>
+
+  <div id="topbar">
+    <div style="font-weight:700;color:#0b5ed7">Malawi Borehole Dashboard</div>
+    <div><span class="muted">Total Malawi Yield:</span> <strong id="totalYield" style="color:#d63384">0</strong> m³</div>
+  </div>
+
+  <div id="container">
+    <div id="map"></div>
+
+    <div id="sidebar">
+      <div class="tabs">
+        <div class="tab active" data-tab="tab1">Borehole Count</div>
+        <div class="tab" data-tab="tab2">Yield per Borehole</div>
+        <div class="tab" data-tab="tab3">Yield per District</div>
+      </div>
+
+      <div class="instructions">
+        <strong>Upload CSV</strong> — CSV must include: <code>site, lat, lon, district, driller, owner, yield_m3</code>
+        <div class="muted">You can either upload a GeoJSON for districts (recommended) or paste it into the code (advanced).</div>
+      </div>
+
+      <!-- Controls -->
+      <label><b>Upload borehole CSV</b></label>
+      <input id="csvFileInput" type="file" accept=".csv">
+
+      <label><b>Upload districts GeoJSON (optional)</b></label>
+      <input id="geojsonInput" type="file" accept=".geojson,.json">
+
+      <label><b>District quick-zoom</b></label>
+      <input id="districtSearch" type="text" placeholder="Type district name and press Enter">
+
+      <label><b>Site search</b></label>
+      <input id="siteSearch" type="text" placeholder="Search site name...">
+
+      <button id="toggleHeatmap">Toggle Heatmap</button>
+      <div style="margin-top:8px">Total boreholes: <strong id="totalCount">0</strong></div>
+
+      <canvas id="countChart" style="margin-top:8px"></canvas>
+
+      <div class="collapsible" id="legendToggle1" style="margin-top:8px">
+        <div><strong>Legend (Count)</strong></div><div class="chev">▾</div>
+      </div>
+      <div id="legendBox1" class="legend">
+        <div class="muted">Clusters show counts; heat shows density.</div>
+      </div>
+
+      <div class="collapsible" id="legendToggle2" style="margin-top:8px">
+        <div><strong>Legend (Yield per Borehole)</strong></div><div class="chev">▾</div>
+      </div>
+      <div id="legendBox2" class="legend">
+        <div id="yieldLegendRows"></div>
+      </div>
+
+      <div class="collapsible" id="legendToggle3" style="margin-top:8px">
+        <div><strong>Legend (Choropleth)</strong></div><div class="chev">▾</div>
+      </div>
+      <div id="legendBox3" class="legend">
+        <div class="muted">Upload GeoJSON or paste into code. Choropleth colors indicate aggregated yield per district.</div>
+        <button id="downloadTemplate" style="margin-top:6px" class="secondary">Download CSV template</button>
+      </div>
+
+      <div id="status" class="muted" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+<script>
+/* -----------------------------
+   CONFIG / EMBED GEOJSON OPTION
+   -----------------------------
+   If you want the dashboard to be a single file with GeoJSON embedded,
+   replace the `null` below with your GeoJSON object (the full JSON).
+   Example:
+     const malawiDistricts = {"type":"FeatureCollection", "features":[ ... ]};
+   If you don't embed, upload the GeoJSON via the "Upload districts GeoJSON" control.
+*/
+const malawiDistricts = null; // <-- optional: paste your GeoJSON object here to embed it
+
+/* Base layers (https to avoid mixed-content blocking) */
+const baseLayers = {
+  "OSM": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OSM contributors' }),
+  "Google Roadmap": L.tileLayer('https://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Roadmap' }),
+  "Google Terrain": L.tileLayer('https://mt0.google.com/vt/lyrs=p&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Terrain' }),
+  "Google Satellite": L.tileLayer('https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Satellite' }),
+  "Google Hybrid": L.tileLayer('https://mt0.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Hybrid' }),
+  "Altered Roadmap": L.tileLayer('https://mt0.google.com/vt/lyrs=r&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Altered Roadmap' }),
+  "Terrain Only": L.tileLayer('https://mt0.google.com/vt/lyrs=t&hl=en&x={x}&y={y}&z={z}', { attribution: 'Google Terrain Only' })
+};
+
+const map = L.map('map', {
+  center: [-13.9, 33.8],
+  zoom: 7,
+  layers: [baseLayers["OSM"]],
+  maxZoom: 19
+});
+L.control.layers(baseLayers).addTo(map);
+
+/* Globals */
+let boreholes = []; // cleaned rows
+let markerCluster = L.markerClusterGroup();
+let heatLayer = null;
+let choroplethLayer = null;
+let districtGeoRaw = null; // holds uploaded or embedded geojson (if provided)
+let countChart = null;
+let yieldChart = null;
+
+/* Utilities */
+function setStatus(msg, isError=false) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = isError ? 'crimson' : '#444';
+  console.log(msg);
+}
+function parseNumber(x) {
+  if (x === null || x === undefined) return NaN;
+  if (typeof x === 'number') return x;
+  const str = String(x).replace(/,/g,'').trim();
+  const n = parseFloat(str);
+  return isNaN(n) ? NaN : n;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function round(n){ return Math.round((n||0)*100)/100; }
+
+/* Breaks / colors */
+function computeBreaks(arr) {
+  const vals = (arr||[]).filter(v=>!isNaN(v)).sort((a,b)=>a-b);
+  if (!vals.length) return [0,0,0];
+  if (vals.length === 1) return [vals[0], vals[0], vals[0]];
+  const q = p => {
+    const idx = (vals.length - 1) * p;
+    const lo = Math.floor(idx), hi = Math.ceil(idx);
+    if (lo === hi) return vals[lo];
+    return vals[lo] * (hi - idx) + vals[hi] * (idx - lo);
+  };
+  return [q(0.33), q(0.66), q(0.9)];
+}
+function getYieldColor(val, breaks) {
+  if (val === null || isNaN(val)) return '#999';
+  if (val <= breaks[0]) return '#2b83ba';
+  if (val <= breaks[1]) return '#7fbf7b';
+  if (val <= breaks[2]) return '#fdae61';
+  return '#d7191c';
+}
+
+/* Clean CSV rows to your exact columns */
+function cleanRows(rows) {
+  const out = [];
+  rows.forEach(r => {
+    // support different header casings/spaces
+    const keys = Object.keys(r).reduce((acc,k)=>{ acc[k.trim().toLowerCase()] = k; return acc; }, {});
+    const site = r[keys['site']] || r['site'] || '';
+    const lat = parseNumber(r[keys['lat']] || r['lat']);
+    const lon = parseNumber(r[keys['lon']] || r['lon']);
+    const district = (r[keys['district']] || r['district'] || '').toString().trim();
+    const driller = r[keys['driller']] || r['driller'] || '';
+    const owner = r[keys['owner']] || r['owner'] || '';
+    const yieldv = parseNumber(r[keys['yield_m3']] || r['yield_m3'] || r['yield'] || r['yield in meter cubic']);
+    if (!isNaN(lat) && !isNaN(lon)) {
+      out.push({
+        site: site?String(site).trim():'',
+        lat: lat,
+        lon: lon,
+        district: district || 'Unknown',
+        driller: driller,
+        owner: owner,
+        yield_m3: isNaN(yieldv) ? null : yieldv
+      });
+    }
+  });
+  return out;
+}
+
+/* Plot count (clusters + heat) */
+function plotBoreholeCount(filterDistrict='', searchTerm='') {
+  markerCluster.clearLayers();
+  const pts = [];
+  const filtered = boreholes.filter(b => (filterDistrict === '' || filterDistrict === 'All' || b.district === filterDistrict)
+    && (searchTerm === '' || b.site.toLowerCase().includes(searchTerm.toLowerCase())));
+  filtered.forEach(b => {
+    const m = L.circleMarker([b.lat,b.lon], { radius:6, fillColor:'#1f78b4', color:'#222', weight:0.6, fillOpacity:0.9 })
+      .bindPopup(`<b>${escapeHtml(b.site)}</b><br>District: ${escapeHtml(b.district)}<br>Yield: ${b.yield_m3===null?'NA':b.yield_m3}`);
+    markerCluster.addLayer(m);
+    pts.push([b.lat,b.lon,0.6]);
+  });
+  // heat
+  if (heatLayer) map.removeLayer(heatLayer);
+  heatLayer = L.heatLayer(pts, { radius:25, blur:15, maxZoom:17, gradient:{0.4:'blue',0.6:'lime',0.9:'red'}});
+  map.addLayer(markerCluster);
+  map.addLayer(heatLayer);
+  document.getElementById('totalCount').textContent = boreholes.length;
+  if (markerCluster.getLayers().length) {
+    try { map.fitBounds(markerCluster.getBounds(), { padding:[20,20] }); } catch(e){}
+  }
+}
+
+/* Plot yield per borehole (color-coded) */
+function plotYieldPerBorehole(filterDistrict='', searchTerm='') {
+  markerCluster.clearLayers();
+  const visible = boreholes.filter(b => (filterDistrict === '' || filterDistrict === 'All' || b.district === filterDistrict)
+    && (searchTerm === '' || b.site.toLowerCase().includes(searchTerm.toLowerCase())));
+  const yields = visible.map(v=>v.yield_m3===null?0:v.yield_m3);
+  const breaks = computeBreaks(yields);
+  visible.forEach(b => {
+    const c = getYieldColor(b.yield_m3===null?0:b.yield_m3, breaks);
+    const m = L.circleMarker([b.lat,b.lon], { radius:7, fillColor:c, color:'#222', weight:0.6, fillOpacity:0.95 })
+      .bindPopup(`<b>${escapeHtml(b.site)}</b><br>District: ${escapeHtml(b.district)}<br>Yield: ${b.yield_m3===null?'NA':b.yield_m3}`);
+    markerCluster.addLayer(m);
+  });
+  map.removeLayer(heatLayer); // hide heat when showing yield
+  map.addLayer(markerCluster);
+  updateYieldLegend(breaks);
+  if (markerCluster.getLayers().length) {
+    try { map.fitBounds(markerCluster.getBounds(), { padding:[20,20] }); } catch(e){}
+  }
+}
+
+/* Draw choropleth using uploaded or embedded GeoJSON */
+function drawChoropleth() {
+  const geo = districtGeoRaw || malawiDistricts;
+  if (!geo || !geo.features) {
+    setStatus('No GeoJSON available for choropleth. Upload it via "Upload districts GeoJSON" or embed it in the code.', true);
+    return;
+  }
+  // aggregate yields by district
+  const agg = {};
+  boreholes.forEach(b => {
+    const d = b.district || 'Unknown';
+    if (!agg[d]) agg[d] = { total:0, count:0 };
+    agg[d].total += (b.yield_m3 || 0);
+    agg[d].count += 1;
+  });
+  const vals = Object.values(agg).map(x=>x.total);
+  const breaks = computeBreaks(vals.length?vals:[0]);
+
+  if (choroplethLayer) map.removeLayer(choroplethLayer);
+  choroplethLayer = L.geoJSON(geo, {
+    style: feature => {
+      const props = feature.properties || {};
+      const name = (props.district || props.name || props.NAME || '').toString().trim();
+      const val = (agg[name] && agg[name].total) ? agg[name].total : 0;
+      return { weight:1, color:'#444', fillOpacity:0.8, fillColor: getYieldColor(val, breaks) };
+    },
+    onEachFeature: (feature, layer) => {
+      const props = feature.properties || {};
+      const name = (props.district || props.name || props.NAME || '').toString().trim();
+      const info = agg[name] || { total:0, count:0 };
+      layer.bindPopup(`<b>${escapeHtml(name)}</b><br>Total yield: ${round(info.total)} m³<br>Boreholes: ${info.count}`);
+    }
+  }).addTo(map);
+  updateYieldLegend(breaks);
+  try { map.fitBounds(choroplethLayer.getBounds(), { padding:[20,20] }); } catch(e){}
+}
+
+/* Update yield legend UI */
+function updateYieldLegend(breaks) {
+  const cont = document.getElementById('yieldLegendRows');
+  if (!cont) return;
+  cont.innerHTML = '';
+  const rows = [
+    { color:'#2b83ba', label:`≤ ${round(breaks[0])}`},
+    { color:'#7fbf7b', label:`${round(breaks[0])} - ${round(breaks[1])}`},
+    { color:'#fdae61', label:`${round(breaks[1])} - ${round(breaks[2])}`},
+    { color:'#d7191c', label:`> ${round(breaks[2])}`}
+  ];
+  rows.forEach(r=>{
+    const d = document.createElement('div'); d.className='legend-row';
+    d.innerHTML = `<div style="width:16px;height:12px;background:${r.color};border-radius:3px;border:1px solid #333"></div><div>${r.label}</div>`;
+    cont.appendChild(d);
+  });
+}
+
+/* Update charts (counts and yield totals by district) */
+function updateCharts() {
+  const agg = {};
+  boreholes.forEach(b => {
+    const d = b.district || 'Unknown';
+    if (!agg[d]) agg[d] = { count:0, total:0 };
+    agg[d].count += 1;
+    agg[d].total += (b.yield_m3 || 0);
+  });
+  const districts = Object.keys(agg).sort();
+  const counts = districts.map(d=>agg[d].count);
+  const totals = districts.map(d=>round(agg[d].total));
+
+  const ctx = document.getElementById('countChart').getContext('2d');
+  if (countChart) countChart.destroy();
+  countChart = new Chart(ctx, {
+    type:'bar',
+    data:{ labels: districts, datasets:[{ label:'Boreholes', data: counts, backgroundColor:'#28a745' }] },
+    options:{ responsive:true, plugins:{ legend:{display:false}, title:{display:true, text:'Boreholes by District'} } }
+  });
+
+  const ctx2 = document.getElementById('districtYieldChart')?.getContext?.('2d');
+  if (ctx2) {
+    if (yieldChart) yieldChart.destroy();
+    yieldChart = new Chart(ctx2, {
+      type:'bar',
+      data:{ labels: districts, datasets:[{ label:'Yield (m³)', data: totals, backgroundColor:'#17a2b8' }] },
+      options:{ responsive:true, plugins:{ legend:{display:false}, title:{display:true, text:'Total Yield by District (m³)'} } }
+    });
+  }
+}
+
+/* Update total sum */
+function updateTotals() {
+  const total = boreholes.reduce((s,b)=>s + (b.yield_m3 || 0), 0);
+  document.getElementById('totalYield').textContent = round(total);
+}
+
+/* ========== Event handlers ========== */
+
+/* CSV upload */
+document.getElementById('csvFileInput').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if (!f) { setStatus('No CSV selected'); return; }
+  setStatus('Parsing CSV...');
+  Papa.parse(f, { header:true, skipEmptyLines:true, complete: (res)=>{
+    boreholes = cleanRows(res.data || []);
+    setStatus(`Loaded ${boreholes.length} boreholes.`);
+    plotBoreholeCount();
+    updateCharts();
+    updateTotals();
+  }, error: e => setStatus('CSV parse error: ' + e.message, true) });
+});
+
+/* GeoJSON upload */
+document.getElementById('geojsonInput').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if (!f) { setStatus('No GeoJSON selected'); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const obj = JSON.parse(e.target.result);
+      districtGeoRaw = obj;
+      setStatus('District GeoJSON loaded.');
+      // if user already uploaded CSV, draw choropleth now
+      drawChoropleth();
+    } catch(err) {
+      setStatus('Invalid GeoJSON: ' + err.message, true);
+    }
+  };
+  reader.readAsText(f);
+});
+
+/* Toggle heatmap */
+document.getElementById('toggleHeatmap').addEventListener('click', ()=>{
+  if (!heatLayer) { setStatus('Heatmap not ready (no CSV loaded).', true); return; }
+  if (map.hasLayer(heatLayer)) map.removeLayer(heatLayer);
+  else map.addLayer(heatLayer);
+});
+
+/* Site search */
+document.getElementById('siteSearch').addEventListener('input', (e)=>{
+  const q = e.target.value.trim();
+  const active = document.querySelector('.tab.active').dataset.tab;
+  if (active === 'tab2') plotYieldPerBorehole('', q);
+  else plotBoreholeCount('', q);
+});
+
+/* District search (press Enter to zoom) */
+document.getElementById('districtSearch').addEventListener('keypress', (e)=>{
+  if (e.key !== 'Enter') return;
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) return;
+  const geo = districtGeoRaw || malawiDistricts;
+  if (!geo || !geo.features) {
+    setStatus('No district GeoJSON available to search. Upload or embed it.', true);
+    return;
+  }
+  const feat = geo.features.find(f=>{
+    const p = f.properties || {};
+    const name = (p.district || p.name || p.NAME || '').toString().trim().toLowerCase();
+    return name === q;
+  });
+  if (feat) {
+    const layer = L.geoJSON(feat);
+    map.fitBounds(layer.getBounds(), { padding:[20,20] });
+    setStatus(`Zoomed to district: ${q}`);
+  } else setStatus('District not found in GeoJSON.', true);
+});
+
+/* Tabs */
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c=>c?.classList?.remove('active'));
+    t.classList.add('active');
+    // show/hide content blocks by id like previous code expects — ensure tab-content divs exist
+    const tabId = t.dataset.tab;
+    const content = document.getElementById(tabId);
+    if (content) content.classList.add('active');
+    // call appropriate render
+    if (tabId === 'tab1') plotBoreholeCount('', document.getElementById('siteSearch').value.trim());
+    else if (tabId === 'tab2') plotYieldPerBorehole('', document.getElementById('siteSearch').value.trim());
+    else if (tabId === 'tab3') {
+      drawChoropleth();
+      updateCharts();
+    }
+  });
+});
+
+/* Collapsible legend toggles */
+[['legendToggle1','legendBox1'], ['legendToggle2','legendBox2'], ['legendToggle3','legendBox3']].forEach(pair=>{
+  const t = document.getElementById(pair[0]), b = document.getElementById(pair[1]);
+  if (!t || !b) return;
+  t.addEventListener('click', ()=> {
+    const showing = b.style.display === 'block' || b.style.display === '';
+    b.style.display = showing ? 'none' : 'block';
+    t.classList.toggle('collapsed', showing);
+  });
+  b.style.display = 'block';
+});
+
+/* Download template */
+document.getElementById('downloadTemplate').addEventListener('click', ()=>{
+  const headers = ['site','lat','lon','district','driller','owner','yield_m3'];
+  const rows = [
+    headers,
+    ['Matchado',-13.777465,34.255830,'Dowa','Blue Water Drilling LTD','Self Help Africa-SHA',12.67],
+    ['Kapeta 1',-12.889878,34.219859,'Nkhotakota','Blue Water Drilling LTD','Mai Aisha Trust-MAT',18.2]
+  ];
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type:'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'borehole_template.csv'; a.click();
+});
+
+/* Startup: safe handling if malawiDistricts is embedded */
+if (malawiDistricts && malawiDistricts.features) {
+  districtGeoRaw = malawiDistricts;
+  setStatus('Embedded GeoJSON detected (embedded in file).');
+} else setStatus('No embedded GeoJSON. Upload via control to enable choropleth.');
+
+/* Expose simple function to render after CSV load */
+function refreshAll() {
+  plotBoreholeCount();
+  updateCharts();
+  updateTotals();
+}
+
+/* Done */
+setStatus('Ready. Upload CSV to populate the dashboard.');
+
+</script>
+</body>
+</html>
